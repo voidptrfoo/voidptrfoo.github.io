@@ -1,0 +1,64 @@
+html {
+	line-height: 1.5;
+	font-family: "Courier New", monospace;
+	color: #808080;
+	background-color: #101010;
+
+	left: 0;
+	right: 0;
+	top: 0;
+	bottom: 0;
+	margin-left: auto;
+	margin-right: auto;
+	margin-top: auto;
+	margin-bottom: auto;
+	position: absolute;
+	width: 40%;
+
+	text-align: justify;
+}
+
+h1, h2, h3 {
+	color: #808080;
+	text-align: center;
+}
+
+img {
+	display: block;
+}
+
+hr {
+	color: #808080;
+}
+
+a:link {
+	color: #808080;
+	text-decoration: underline;
+}
+
+.contacts {
+	display: inline-block;
+	border: 2px solid;
+	padding: 16px;
+	border-radius: 10%;
+}
+
+.code-snippet {
+	display: block;
+	border: 1px solid;
+	padding: 8px;
+	color: #808080;
+	background-color: #181818;
+}
+
+.page-title {
+	text-align: start;
+}
+
+.center {
+	text-align: center;
+	display: block;
+	margin-left: auto;
+	margin-right: auto;
+	padding: 8px;
+}

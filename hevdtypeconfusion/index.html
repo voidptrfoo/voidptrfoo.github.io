@@ -1,0 +1,519 @@
+<!doctype html>
+
+<html lang="en-US">
+	<head>
+		<meta charset="utf-8"/>
+		<link href="../styles/style.css" rel="stylesheet" />
+
+		<title>(*voidptrfoo)(); /* [Part 1 0f 2] HackSys Extreme Vulnerable Driver Type Confusion: Reverse Engineering and Debugging */</title>
+	</head>
+
+	<body>
+		<h1>[Part 1 0f 2]</br>HackSys Extreme Vulnerable Driver Type Confusion:</br>Reverse Engineering and Debugging</h1>
+
+		<h2>1 - Introduction</h2>
+		<p>
+		This is the first blog post I ever publish. I hope it could have useful information for anyone interested in Windows Kernel exploitation, reverse engineering and debugging.<br/>
+		I will explain all steps I took in order to exploit the Type Confusion vulnerability contained in <a href="https://github.com/hacksysteam/HackSysExtremeVulnerableDriver">HackSys Extreme Vulnerable Driver (HEVD)</a>.<br/>
+		I will start on how to setup the kernel debugging lab, the reverse engineering and debugging process itself (in order to identify the vulnerability),
+		and finally how to exploit the vulnerability, giving details on how to bypass mitigations like SMEP and KVA Shadowing and the shellcode creation process.<br/>
+		This blog post is the first part, in which I will show the reverse engineering and debugging process. In part 2 I will show the exploit development process.
+		</p>
+
+		<h3>1.1 - For whom is this post for?</h3>
+		<p>
+		I hope this post could be an introduction to those interested in Windows kernel exploitation, reverse engineering and debugging.<br/>
+		That being said, I assume you are comfortable with C programming have some sort of familiarity with x86_64 assembly, debugging and tools for reversing binaries, like <a href="https://hex-rays.com/">IDA</a> or <a href="https://ghidra-sre.org/">Ghidra</a>, for example.<br/>
+		Of course, I will try my best to make this blog post as self-contained as possible, but it is by no means intended to be an introduction to binary exploitation itself or the other beforementioned topics.<br/>
+		</p>
+
+		<h2>2 - Setting up kernel debugging</h2>
+		<p>
+		In order to setup kernel debugging, I will be breaking the process in steps and in subsections while I provide explanations in between.<br/>
+		This way, the first steps needed are:
+		<ul>
+			<li>enable Hyper-V on the host machine;</li>
+			<li>create two (2) Windows virtual machines, I will call them as debuggee machine and debugger machine;</li>
+			<li>in the debuggee machine, download the following:<br/>
+				<a href="https://github.com/hacksysteam/HackSysExtremeVulnerableDriver/releases">HEVD</a>,
+				<a href="https://developer.microsoft.com/en-us/windows/downloads/windows-sdk/">Windows SDK</a>;</li>
+			<li>in the debugger machine, download the following:<br/>
+				<a href="https://developer.microsoft.com/en-us/windows/downloads/windows-sdk/">Windows SDK</a>,
+				<a href="https://visualstudio.microsoft.com/#vs-section">Visual Studio</a>,
+				a tool for reversing binaries; for this post, I will be using <a href="https://hex-rays.com/">IDA</a></li>
+		</ul>
+		With the exception of the HEVD driver, install the downloaded software in its respective machines.<br/>
+
+		<h3>2.1 - Installing the HEVD driver</h3>
+		The driver will be installed only on the debuggee machine. To install it, open a privileged Command Prompt, read the following explanations execute the required commands.<br/>
+		First, it is needed to enable a functionality that will permit that non-signed drivers can be loaded in the system. If you have setted up the debuggee machine with secure boot, it will be needed to disable it. To enable the installation of non-signed drivers, in order to install HEVD, the following command is needed:
+		<pre><code class="code-snippet">bcdedit /set testsigning on</code></pre>
+		<a href="https://learn.microsoft.com/en-us/windows-hardware/manufacture/desktop/bcdedit-command-line-options?view=windows-11">Learn more about bcedit</a>.<br/>
+		Next, reboot the machine. When the machine finish rebooting, open a privileged Command Prompt. To install the driver, run the following command:
+		<pre><code class="code-snippet">sc create HEVD binPath=C:\PATH\TO\THE\BINARY\HEVD.sys type=kernel start=system</code></pre>
+		In the binPath parameter it will be placed the absolute path to where the driver were extracted to in the debuggee machine. The type parameter indicates that the binary is a driver, and thus runs on kernel land.
+		The start parameter tells that the driver will start always during kernel initialization. <a href="https://learn.microsoft.com/en-us/windows-server/administration/windows-commands/sc-config">Learn more about sc</a>.</br>
+		Finally, reboot the machine. Driver installation is done.
+		</p>
+
+		<h3>2.2 - Initializing a debugging session</h3>
+		<p>
+		In order to enable a debugging sesssion, having done the previous steps, there are many possibilities.
+		The method chosen by me was the one using COM alongside with named pipes, as I find out it worked easily and flawlessly with virtual machines created locally using Hyper-V, and this is the choice I made and the one I will taught next.
+		This way, read the explanations and follow the steps provided in order to setup the debugging session.<br/>
+		In the debugger machine, open a privileged Windows Powershell and type the following in order to create the named pipe for the debuggee machine which will be used in order to enable the debugging session:
+		<pre><code class="code-snippet">Set-VmComPort DEBUGGEE_MACHINE_NAME 1 \\.\pipe\DEBUGGEE_PIPE_NAME</code></pre>
+		Substitute DEBUGGEE_MACHINE_NAME and DEBUGGEE_PIPE_NAME by the actual name you have given to your debuggee machine and the name you want to give to the named pipe, respectively. <a href="https://learn.microsoft.com/en-us/powershell/module/hyper-v/set-vmcomport?view=windowsserver2022-ps">Learn more about Set-VmComPort</a>.<br/>
+		Next, in the debuggee machine, open a privileged Command Prompt and type the following:
+		<pre><code class="code-snippet">bcdedit /debug on</code></pre>
+		<pre><code class="code-snippet">bcdedit /dbgsettings serial debugport:1 baudrate:115200</code></pre>
+		In the debugger machine, run WinDbg (X64) as administrator. When it finishes open, press Ctrl+K in order to open the kernel debugging options window.
+		When the Kernel Debugging window opens, select the COM tab and change the Port field with \\.\pipe\DEBUGGEE_PIPE_NAME. Do not forget to change DEBUGGEE_PIPE_NAME by the actual name you given to the newly created named pipe.
+		Then, check the boxes Pipe and Reconnect and press the OK button.<br/>
+		Finally, it is only needed to reboot the debuggee machine and, if all the steps were followed and successfully executed, a debugging session will start in the WinDbg (X64) instance in the debugger machine.
+		</p>
+
+		<h2>3 - Reversing and Debugging: the vulnerability discovery process</h2>
+		<p>
+		Before we are able to exploit the vulnerability, we first need to spot it. In order to do so, we will be doing as if we do not have acess to the driver's source code.<br/>
+		A disclaimer I would like to give before we proceed is: as API functions are presented alongside with the documentation, it is vital that the specification to be studied. This is due to: 1) have a real understanding of what is real happening and; 2) I want you to get used to reading the documentation when needed.
+		I would not be doing a good job in explaining argument by argument if I want to take in consideration your learning process. This way, reading the documentation and have a real understanding of the API functions is definitive for your success while learning from this blog post.
+		</p>
+
+		<h3>3.1 - Windows Drivers and IOCTLs</h3>
+		<p>
+		A common attack surface, and the one we will be studying here, when we talk about device drivers in general, are the <a href="https://learn.microsoft.com/en-us/windows-hardware/drivers/kernel/introduction-to-i-o-control-codes">IOCTLs</a>. There are others attack vectors, but this information is given as a disclaimer and for completeness.<br/>
+		In order to identify possible IOCTLs codes, which are necessary in order to identify possible code paths that are vulnerable, we first need to learn about one important Windows defined structure: <a href="https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/wdm/ns-wdm-_driver_object">_DRIVER_OBJECT</a>.<br/>
+		To better understand this structure for our purposes, we will first pause the debuggee machine in the debugger and, then, we will use the dt command in WinDbg to display the _DRIVER_OBJECT structure:
+		<pre><code class="code-snippet">kd&gt; dt _DRIVER_OBJECT
+ntdll!_DRIVER_OBJECT
+   +0x000 Type             : Int2B
+   +0x002 Size             : Int2B
+   +0x008 DeviceObject     : Ptr64 _DEVICE_OBJECT
+   +0x010 Flags            : Uint4B
+   +0x018 DriverStart      : Ptr64 Void
+   +0x020 DriverSize       : Uint4B
+   +0x028 DriverSection    : Ptr64 Void
+   +0x030 DriverExtension  : Ptr64 _DRIVER_EXTENSION
+   +0x038 DriverName       : _UNICODE_STRING
+   +0x048 HardwareDatabase : Ptr64 _UNICODE_STRING
+   +0x050 FastIoDispatch   : Ptr64 _FAST_IO_DISPATCH
+   +0x058 DriverInit       : Ptr64     long 
+   +0x060 DriverStartIo    : Ptr64     void 
+   +0x068 DriverUnload     : Ptr64     void 
+   +0x070 MajorFunction    : [28] Ptr64     long 
+</code></pre>
+		The field that most matters to us is the <a href="https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/wdm/ns-wdm-_driver_object#members">MajorFunction</a> element, at offset +0x070, which is a dispatch table.<br/>
+		What is interesting about this field is that when the <a href="https://learn.microsoft.com/en-us/windows-hardware/drivers/wdf/driverentry-for-kmdf-drivers">DriverEntry routine</a> gets executed it populates an object of _DRIVER_OBJECT type, and the MajorFunction elements will contain the function that will handle the IOCTLs for the driver.<br/>
+		This way, the approach used here is the one of identify the DriverEntry routine in the driver and, once we get there, identify the function that will handle the IOCTLs by observing the _DRIVER_OBJECT object being populated. Having done that we could place a breakpoint in it and start the vulnerability hunting.<br/>
+		Likewise, lets start by opening the HEVD.sys in IDA: once IDA opens press the New button and proceed to select the HEVD.sys file, a box asking if we want to resolve symbols will appear and we will do not accept.<br/>
+		Accepting symbol resolution is not necessary. For the purposes of this post, not resolving symbols will teach us valuable lessons that will force us to have a real grasp of the binary instead of having a more easy to follow approach making use of the symbols names provided by the developer. 
+		We want to have the less unrealistic scenario as possible. Just like source code, symbols will very rarely made available by the developer. So it is a good idea to depend exclusively and solely on the binary.
+		Although we will make use of native symbols, like the Windows API functions, this is not a major problem as Windows API symbols are publicly available and it is more likely that we are able to resolve this symbols than the ones which are exclusive of the specific driver we are analyzing.<br/>
+		Having done the previous considerations, lets proceed with the analysis.<br/>
+		Once IDA finishes the disassembly process of the HEVD.sys file, it will automatically place us in the function that will the real DriverEntry function, at address 0x000000014008A14F:
+		<img src="../images/1.png" alt="1" class="center">
+		From the <a href="https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/wdm/nc-wdm-driver_initialize">Windows API documentation</a>:
+		<pre><code class="code-snippet">DRIVER_INITIALIZE DriverInitialize;
+
+NTSTATUS DriverInitialize(
+  [in] _DRIVER_OBJECT *DriverObject,
+  [in] PUNICODE_STRING RegistryPath
+)
+{...}</code></pre>
+		The <a href="https://learn.microsoft.com/en-us/cpp/build/x64-calling-convention?view=msvc-170">calling convention</a> for x86_64 expects the RCX register to hold the first argument of a function if this argument is a pointer, which is the case for the DriverInitialize API. Knowing that, we can proceed to analyze the sub_14008A00 routine:
+		<img src="../images/2.png" alt="2" class="center">
+		It is possible to note that the RCX value is saved on RBX before it is overwritten, so RBX holds now the address for our _DRIVER_OBJECT. Next, we can see it being populated once the jns instruction is met at address 0x0000000140008A075:
+		<img src="../images/3.png" alt="3" class="center">
+		But how do we know that this is the case? Well, if we look closer, the check is done in order to verify that IoCreateDevice call succeeded. In other words: it checks if the driver was successfully instantiated. This way, next is to populate _DRIVER_OBJECT:
+		<img src="../images/4.png" alt="4" class="center">
+		We know from _DRIVER_OBJECT documentation that at offset +0x070 we have an embedded dispatch table and that one of the registered functions in this dispatch table are the one that handles IOCTLs.
+		Furthermore, we can see that the memory address to which RBX points to (remember it holds a pointer to _DRIVER_OBJECT) is being populated at offsets greater than or equal to +0x070. This way, we can take for granted that one of those functions is the one which will handle the IOCTLs.<br/>
+		Precisley, we know <a href="https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/wdm/nc-wdm-driver_dispatch">DispatchDeviceControl</a> routine is registered at offset 0x0E0, given that when the device driver is programmed we know that to do so we access the MajorFunction array
+		at offset 0x0E by using the identifier IRP_MJ_DEVICE_CONTROL, this way: 0x070 + 0x0E*0x08 == 0x0E0.
+		<img src="../images/5.png" alt="5" class="center">
+		The constant used in the comparison is generated, while coding in C or in C++, via a macro called <a href="https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/d4drvif/nf-d4drvif-ctl_code">CTL_CODE</a>.
+		This macro is used in order to generate this constant and, later, being able to use it alongside with the DeviceIoControl function in order to communicate with a driver targeting an specific IOCTL exposed by this same driver.<br/>
+		In our case, we do not need to bother generating the constant using the macro as we know it beforehand, so we will just place the hardcoded value directly in our DeviceIoControl function call later on.<br/>
+		Lasly, we need to discover the device name of the driver, so we can communicate with it.<br/>
+		In order to obtain this information we will be observing another function call in the DriverEntry routine. The API function in question is <a href="https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/wdm/nf-wdm-iocreatedevice">IoCreateDevice</a> which will register a device.
+		Observing the documentation we can see that the third argument, DeviceName, is what matters to us, which is "\\.\HackSysExtremeVulnerableDriver".
+		<img src="../images/10.png" alt="10" class="center">
+		You may be questioning why the previous name instead of \\Device\\HackSysExtremeVulnerableDriver, and where do the \\.\HackSysExtremeVulnerableDriver came from. This is due to how <a href="https://learn.microsoft.com/en-us/windows/win32/fileio/naming-a-file?redirectedfrom=MSDN#win32-device-namespaces">Win32 Device Namespaces</a>
+		should be handled. Once a device driver is registerd, the prefix "\\.\" will be used in order to communicate with it, and not by specifying the "\\Device\\" prefix the same way it is used to register the device driver.
+		Having those informations at hand, now we should start developing our exploit, as with it we can place breakpoints in the driver and have a better undestand of its behavior.<br/>
+		To interact with HEVD IOCTLs we will need first to create an empty project C++ in Visual Studio.
+		Once the empty project is created, select under Solution Explorer the Source Files folder and click Ctrl+Shift+A in order to create the source file for our exploit. Having these steps being done we can proceed with the exploit writing.<br/>
+		The first thing we need to do in order to comunicate with the driver is to create a handle to it using the <a href="https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-createfilea">CreateFileA</a> API function and, then,
+		using one of the IOCTLs codes, communicate with the driver sending our buffer using the <a href="https://learn.microsoft.com/en-us/windows/win32/api/ioapiset/nf-ioapiset-deviceiocontrol">DeviceIoControl</a> API function.
+		<pre><code class="code-snippet">#include &lt;windows.h&gt;
+#include &lt;atlstr.h&gt;
+#include &lt;cstdio&gt;
+#include &lt;cstdlib&gt;
+
+int main() {
+	LPVOID buf = (LPVOID)malloc(sizeof(PVOID)*0x100);
+	size_t bufSize = sizeof(PVOID)*0x100;
+	LPDWORD bytesReturned = (LPDWORD)malloc(0x1000);
+
+	HANDLE hFile = CreateFileA(
+		"\\\\.\\HackSysExtremeVulnerableDriver",
+		GENERIC_READ | GENERIC_WRITE,
+		FILE_SHARE_READ | FILE_SHARE_WRITE,
+		NULL,
+		OPEN_EXISTING,
+		FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OVERLAPPED,
+		NULL
+	);
+
+	DeviceIoControl(
+		hFile,
+		0x222023,
+		(LPVOID)buf,
+		(DWORD)bufSize,
+		NULL,
+		0,
+		bytesReturned,
+		NULL
+	);
+
+	return 0;
+}</code></pre>
+		Before we build the project, change the Debug flag build to Release, under the top side of the window in Visual Studio.<br/>
+		Now we can save the changes in the project by pressing Ctrl+Shift+S and, then, build it by pressing Ctrl+Shift+B. Once compilation is finished, a box on the bottom side will appear telling us the path to the executable of our program.<br/>
+		Copy the executable to the debuggee machine and we are ready to start the debugging in our target IOCTL.
+		To confirm it, lets place a breakpoint in the beginning of the Type Confusion IOCTL code branch and see if are able trigger it.
+		<pre><code class="code-snippet">bp HEVD + (00000001400853B1 - 0000000140000000)</code></pre>
+		Next, lets execute our exploit binary in the debuggee machine. Having following the previous steps, we can observe that we have sucessfully hitted the breakpoint.
+		<pre><code class="code-snippet">************* Path validation summary **************
+Response                         Time (ms)     Location
+Deferred                                       srv*
+Symbol search path is: srv*
+Executable search path is: 
+Windows 10 Kernel Version 19041 MP (1 procs) Free x64
+Edition build lab: 19041.1.amd64fre.vb_release.191206-1406
+Machine Name:
+Kernel base = 0xfffff802`5f000000 PsLoadedModuleList = 0xfffff802`5fc2a360
+System Uptime: 0 days 0:00:00.000
+KDTARGET: Refreshing KD connection
+Capacity:5000, FullChargedCapacity:5000, Voltage:5000, Rate:0
+Break instruction exception - code 80000003 (first chance)
+*******************************************************************************
+*                                                                             *
+*   You are seeing this message because you pressed either                    *
+*       CTRL+C (if you run console kernel debugger) or,                       *
+*       CTRL+BREAK (if you run GUI kernel debugger),                          *
+*   on your debugger machine's keyboard.                                      *
+*                                                                             *
+*                   THIS IS NOT A BUG OR A SYSTEM CRASH                       *
+*                                                                             *
+* If you did not intend to break into the debugger, press the "g" key, then   *
+* press the "Enter" key now.  This message might immediately reappear.  If it *
+* does, press "g" and "Enter" again.                                          *
+*                                                                             *
+*******************************************************************************
+nt!DbgBreakPointWithStatus:
+fffff802`5f406be0 cc              int     3
+kd&gt; bp HEVD+(00000001400853B1 - 0000000140000000)
+kd&gt; g
+Breakpoint 0 hit
+HEVD+0x853b1:
+fffff802`67ad53b1 bb03000000      mov     ebx,3
+</code></pre>
+		</p>
+
+		<h3>3.2 - Identifying the Vulnerability</h3>
+		<p>
+		Lets suppose we are covering the IOCTLs present in the driver one by one in order to came accross a vulnerable code path, which is most likely what we want to do in scenarios like this, such that we have a full coverage of the driver.<br/>
+		At some point in this process we will end up analyzing the following block:
+		<img src="../images/6.png" alt="6" class="center">
+		This way, we want to analyze the code path that we are lead to in case we met the condition of passing an IOCTL code equal to the constant 0x222023:
+		<img src="../images/7.png" alt="7" class="center">
+		Before we proceed, we must take into account important details. First that the function that ultimately leads us to the code path containing the type confusion, is the one responsible for handling <a href="https://learn.microsoft.com/en-us/windows-hardware/drivers/kernel/irp-mj-device-control">IRP_MJ_DEVICE_CONTROL</a> requests.<br/>
+		In other words, this function is a <a href="https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/wdm/nc-wdm-driver_dispatch">DispatchDeviceControl</a> routine. As per Microsoft documentation:
+		<pre><code class="code-snippet">DRIVER_DISPATCH DriverDispatch;
+
+NTSTATUS DriverDispatch(
+  [in, out] _DEVICE_OBJECT *DeviceObject,
+  [in, out] _IRP *Irp
+)
+{...}</code></pre>
+		What matters to us is that the second argument, which is a structure o type _IRP, contains a pointer to our buffer that we provide when we call DeviceIoControl.<br/>
+		In order to better undestand it, lets observe how the function behaves and handles this argument:
+		<img src="../images/8.png" alt="8" class="center">
+		<img src="../images/9.png" alt="9" class="center">
+		Accordingly to <a href="https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/wdm/nc-wdm-driver_dispatch#remarks">Microsoft documentation</a>, the driver's I/O stack location, which will contain our input, must be retrieved, if necessary, using <a href="https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/wdm/nf-wdm-iogetcurrentirpstacklocation">IoGetCurrentIrpStackLocation</a>.
+		Following the <a href="https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/wdm/ns-wdm-_irp">documentation</a>, the definition of the IRP structure is as follows:
+		<pre><code class="code-snippet">typedef struct _IRP {
+  CSHORT                    Type;
+  USHORT                    Size;
+  PMDL                      MdlAddress;
+  ULONG                     Flags;
+  union {
+    struct _IRP     *MasterIrp;
+    __volatile LONG IrpCount;
+    PVOID           SystemBuffer;
+  } AssociatedIrp;
+  LIST_ENTRY                ThreadListEntry;
+  IO_STATUS_BLOCK           IoStatus;
+  KPROCESSOR_MODE           RequestorMode;
+  BOOLEAN                   PendingReturned;
+  CHAR                      StackCount;
+  CHAR                      CurrentLocation;
+  BOOLEAN                   Cancel;
+  KIRQL                     CancelIrql;
+  CCHAR                     ApcEnvironment;
+  UCHAR                     AllocationFlags;
+  union {
+    PIO_STATUS_BLOCK UserIosb;
+    PVOID            IoRingContext;
+  };
+  PKEVENT                   UserEvent;
+  union {
+    struct {
+      union {
+        PIO_APC_ROUTINE UserApcRoutine;
+        PVOID           IssuingProcess;
+      };
+      union {
+        PVOID                 UserApcContext;
+#if ...
+        _IORING_OBJECT        *IoRing;
+#else
+        struct _IORING_OBJECT *IoRing;
+#endif
+      };
+    } AsynchronousParameters;
+    LARGE_INTEGER AllocationSize;
+  } Overlay;
+  __volatile PDRIVER_CANCEL CancelRoutine;
+  PVOID                     UserBuffer;
+  union {
+    struct {
+      union {
+        KDEVICE_QUEUE_ENTRY DeviceQueueEntry;
+        struct {
+          PVOID DriverContext[4];
+        };
+      };
+      PETHREAD     Thread;
+      PCHAR        AuxiliaryBuffer;
+      struct {
+        LIST_ENTRY ListEntry;
+        union {
+          struct _IO_STACK_LOCATION *CurrentStackLocation;
+          ULONG                     PacketType;
+        };
+      };
+      PFILE_OBJECT OriginalFileObject;
+    } Overlay;
+    KAPC  Apc;
+    PVOID CompletionKey;
+  } Tail;
+} IRP;</code></pre>
+		Knowing that IoGetCurrentIrpStackLocation returns to us an IO_STACK_LOCATION structure and observing the _IRP definition,
+		we can tell that the pointer CurrentStackLocation inside the nested Overlay struct is what is needed to be retrieved by IoGetCurrentIrpStackLocation.<br/>
+		Furthermore, it is important to note that IoGetCurrentIrpStackLocation is inlined during compilation. This way, during the reversing process, we will not find a call instruction to IoGetCurrentIrpStackLocation,
+		instead its instructions will be directly embedded in the DispatchDeviceControl routine.<br/>
+		We must also remember that the _IRP is the second argument of DispatchDeviceControl, meaning its address is passed in the RDX register.<br/>
+		To have a better grasp of it, we will place a breakpoint at DispatchDeviceControl entry, execute our binary to communicate with the driver and then analyze how the _IRP provided structure is handled:
+		<pre><code class="code-snippet">kd&gt; bp HEVD + (0x0000000140085078 - 0x0000000140000000)
+kd&gt; g
+Breakpoint 0 hit
+HEVD+0x85078:
+fffff802`56ad5078 488bc4          mov     rax,rsp
+kd&gt; dx -r1 -nv (*((ntdll!_IRP *)@rdx))
+(*((ntdll!_IRP *)@rdx))                 [Type: _IRP]
+    [+0x000] Type             : 6 [Type: short]
+    [+0x002] Size             : 0x118 [Type: unsigned short]
+    [+0x004] AllocationProcessorNumber : 0x0 [Type: unsigned short]
+    [+0x006] Reserved         : 0x0 [Type: unsigned short]
+    [+0x008] MdlAddress       : 0x0 [Type: _MDL *]
+    [+0x010] Flags            : 0x60000 [Type: unsigned long]
+    [+0x018] AssociatedIrp    [Type: <anonymous-tag>]
+    [+0x020] ThreadListEntry  [Type: _LIST_ENTRY]
+    [+0x030] IoStatus         [Type: _IO_STATUS_BLOCK]
+    [+0x040] RequestorMode    : 1 [Type: char]
+    [+0x041] PendingReturned  : 0x0 [Type: unsigned char]
+    [+0x042] StackCount       : 1 [Type: char]
+    [+0x043] CurrentLocation  : 1 [Type: char]
+    [+0x044] Cancel           : 0x0 [Type: unsigned char]
+    [+0x045] CancelIrql       : 0x0 [Type: unsigned char]
+    [+0x046] ApcEnvironment   : 0 [Type: char]
+    [+0x047] AllocationFlags  : 0x4 [Type: unsigned char]
+    [+0x048] UserIosb         : 0x7ae0b0fd00 [Type: _IO_STATUS_BLOCK *]
+    [+0x050] UserEvent        : 0x0 [Type: _KEVENT *]
+    [+0x058] Overlay          [Type: <anonymous-tag>]
+    [+0x068] CancelRoutine    : 0x0 : 0x0 [Type: void (__cdecl*)(_DEVICE_OBJECT *,_IRP *)]
+    [+0x070] UserBuffer       : 0x0 [Type: void *]
+    [+0x078] Tail             [Type: <anonymous-tag>]
+kd&gt; dx -r1 -nv (*((ntdll!_IRP *)@rdx)).Tail
+(*((ntdll!_IRP *)@rdx)).Tail                 [Type: <anonymous-tag>]
+    [+0x000] Overlay          [Type: <anonymous-tag>]
+    [+0x000] Apc              [Type: _KAPC]
+    [+0x000] CompletionKey    : 0x0 [Type: void *]
+kd&gt; dx -r1 -nv (*((ntdll!_IRP *)@rdx)).Tail.Overlay
+(*((ntdll!_IRP *)@rdx)).Tail.Overlay                 [Type: <anonymous-tag>]
+    [+0x000] DeviceQueueEntry [Type: _KDEVICE_QUEUE_ENTRY]
+    [+0x000] DriverContext    [Type: void * [4]]
+    [+0x020] Thread           : 0xffffca8e5db75080 [Type: _ETHREAD *]
+    [+0x028] AuxiliaryBuffer  : 0x0 [Type: char *]
+    [+0x030] ListEntry        [Type: _LIST_ENTRY]
+    [+0x040] CurrentStackLocation : 0xffffca8e5bfc0420 : IRP_MJ_DEVICE_CONTROL / 0x0 for Device for "\Driver\HEVD" [Type: _IO_STACK_LOCATION *]
+    [+0x040] PacketType       : 0x5bfc0420 [Type: unsigned long]
+    [+0x048] OriginalFileObject : 0xffffca8e60e4e950 : "" - Device for "\Driver\HEVD" [Type: _FILE_OBJECT *]
+    [+0x050] IrpExtension     : 0x0 [Type: void *]</code></pre>
+		Observing the offsets and knowing that CurrentStackLocation is an embedded element in the _IRP struct, we can tell that we can obtain its address by dereferencing RDX using +0x0B8 (+0x078 + +0x040) as an offset. And this is exactly what happens at 0x0000000140085091, as shown previously.<br/>
+		But where do our buffer lies on? To answer that, we need to know more about the _IO_STACK_LOCATION struct. Looking at its definition, we can see that it is composed by a union and that its field are dereferenced based on what type of request was sent. In our case, it is a DeviceIoControl request type.<br/>
+		This way, considering the context we are at in our debugging session, we can now locate our buffer in WinDbg as follows.
+		<pre><code class="code-snippet">kd&gt; dx -r1 -nv (*((ntdll!_IO_STACK_LOCATION *)(@rdx + (0x78 + 0x40))))
+(*((ntdll!_IO_STACK_LOCATION *)(@rdx + (0x78 + 0x40))))                 [Type: _IO_STACK_LOCATION]
+    [+0x000] MajorFunction    : 0x20 [Type: unsigned char]
+    [+0x001] MinorFunction    : 0x4 [Type: unsigned char]
+    [+0x002] Flags            : 0xfc [Type: unsigned char]
+    [+0x003] Control          : 0x5b [Type: unsigned char]
+    [+0x008] Parameters       [Type: <anonymous-tag>]
+    [+0x028] DeviceObject     : 0x800 [Type: _DEVICE_OBJECT *]
+    [+0x030] FileObject       : 0x222023 [Type: _FILE_OBJECT *]
+    [+0x038] CompletionRoutine : 0x19073c30a30 : 0x19073c30a30 [Type: long (__cdecl*)(_DEVICE_OBJECT *,_IRP *,void *)]
+    [+0x040] Context          : 0xffffca8e5b5aad10 [Type: void *]
+kd&gt; dx -r1 -nv (*((ntdll!_IO_STACK_LOCATION *)(@rdx + (0x78 + 0x40)))).Parameters.DeviceIoControl
+(*((ntdll!_IO_STACK_LOCATION *)(@rdx + (0x78 + 0x40)))).Parameters.DeviceIoControl                 [Type: <anonymous-tag>]
+    [+0x000] OutputBufferLength : 0x60e4e950 [Type: unsigned long]
+    [+0x008] InputBufferLength : 0x0 [Type: unsigned long]
+    [+0x010] IoControlCode    : 0x5000e [Type: unsigned long]
+    [+0x018] Type3InputBuffer : 0x0 [Type: void *]
+kd&gt; dq poi(poi((@rdx + (0x78 + 0x40))) + (0x08 + 0x18))
+00000190`73c30a30  32323232`32323232 32323232`32323232
+00000190`73c30a40  32323232`32323232 32323232`32323232
+00000190`73c30a50  32323232`32323232 32323232`32323232
+00000190`73c30a60  32323232`32323232 32323232`32323232
+00000190`73c30a70  32323232`32323232 32323232`32323232
+00000190`73c30a80  32323232`32323232 32323232`32323232
+00000190`73c30a90  32323232`32323232 32323232`32323232
+00000190`73c30aa0  32323232`32323232 32323232`32323232</code></pre>
+		As we can see, we successfully located it. And the retrieving of our buffer can be confirmed in the driver, after it dereferences the _IRP argument in RDX at offset 0xb8, the addres retrieved is also dereferenced at offset 0x20 (0x08 + 0x18).
+		<img src="../images/11.png" alt="11" class="center">
+		<img src="../images/12.png" alt="12" class="center">
+		Proceeding with the reversing process, we can now analyze the behavior of the driver when dealing with our input and locate the vulnerability.<br/>
+		As we can see, when our buffer is retrieved at 0x00000001400874FC, after that it verifies if the input buffer is NULL, then, if this is not the case, we enter another function which will handle what we sent to the driver.<br/>
+		<img src="../images/13.png" alt="13" class="center">
+		Once inside the sub_140087314 function and after analyzing its behavior we note that our buffer is passed as a parameter to another function, sub_140087514. Of course, we are ignoring where it is passed as an argument to DbgPrintEx, which, in this case, we are not interested in.<br/>
+		<img src="../images/14.png" alt="14" class="center">
+		<img src="../images/15.png" alt="15" class="center">
+		Understanding the sub_140087514 function shows us that the vulnerable behavior is inside it.
+		<img src="../images/16.png" alt="16" class="center">
+		As we can see, the driver is calling an arbitrary address from our buffer, at offset 0x08. This way, we can redirect its execution flow to (almost) anywhere we want.
+		</p>
+
+		<h3>3.3 - A word about unions in C</h3>
+		<p>
+		You may be asking yourself: "why on earth would a driver retrieve a function pointer from a buffer sent to it via an IOCTL?"<br/>
+		The answer is not easily identifiable looking exclusively to the compiled binary. In this case, this is because of how unions in C are placed in memory, but what is happening there is a type confusion, meaning the developer received a data of, say, type A and handle it as data of type B.<br/>
+		So, only for this explanation, we will permit ourselves to look at the source code to see how this confusion happens, because its explanation is dependant on the C source code and how the unions defined for the driver were handled on it.<br/>
+		Accordingly to the <a href="https://github.com/hacksysteam/HackSysExtremeVulnerableDriver/blob/master/Driver/HEVD/Windows/TypeConfusion.h">HEVD source code</a> the structures that the driver deal with are the following:
+		<pre><code class="code-snippet">...
+typedef struct _USER_TYPE_CONFUSION_OBJECT
+{
+    ULONG_PTR ObjectID;
+    ULONG_PTR ObjectType;
+} USER_TYPE_CONFUSION_OBJECT, *PUSER_TYPE_CONFUSION_OBJECT;
+...
+typedef struct _KERNEL_TYPE_CONFUSION_OBJECT
+{
+    ULONG_PTR ObjectID;
+    union
+    {
+        ULONG_PTR ObjectType;
+        FunctionPointer Callback;
+    };
+} KERNEL_TYPE_CONFUSION_OBJECT, *PKERNEL_TYPE_CONFUSION_OBJECT;
+...</pre></code>
+		The _KERNEL_TYPE_CONFUSION_OBJECT struct have an union in its definition, meaning that the field ObjectType and Callback can be both acessed and that they are placed in the same memory address in a _KERNEL_TYPE_CONFUSION_OBJECT object.
+		From the <a href="https://github.com/hacksysteam/HackSysExtremeVulnerableDriver/blob/master/Driver/HEVD/Windows/TypeConfusion.c">HEVD source code</a>:
+		<pre><code class="code-snippet">...
+NTSTATUS
+TypeConfusionObjectInitializer(
+    _In_ PKERNEL_TYPE_CONFUSION_OBJECT KernelTypeConfusionObject
+)
+{
+    NTSTATUS Status = STATUS_SUCCESS;
+
+    PAGED_CODE();
+
+    DbgPrint("[+] KernelTypeConfusionObject-&gt;Callback: 0x%p\n", KernelTypeConfusionObject-&gt;Callback);
+    DbgPrint("[+] Calling Callback\n");
+
+    KernelTypeConfusionObject-&gt;Callback();
+
+    DbgPrint("[+] Kernel Type Confusion Object Initialized\n");
+
+    return Status;
+}
+...
+NTSTATUS
+TriggerTypeConfusion(
+    _In_ PUSER_TYPE_CONFUSION_OBJECT UserTypeConfusionObject
+)
+{
+    NTSTATUS Status = STATUS_UNSUCCESSFUL;
+    PKERNEL_TYPE_CONFUSION_OBJECT KernelTypeConfusionObject = NULL;
+
+    PAGED_CODE();
+
+    __try
+    {
+        //
+        // Verify if the buffer resides in user mode
+        //
+
+        ProbeForRead(
+            UserTypeConfusionObject,
+            sizeof(USER_TYPE_CONFUSION_OBJECT),
+            (ULONG)__alignof(UCHAR)
+        );
+
+        //
+        // Allocate Pool chunk
+        //
+
+        KernelTypeConfusionObject = (PKERNEL_TYPE_CONFUSION_OBJECT)ExAllocatePoolWithTag(
+            NonPagedPool,
+            sizeof(KERNEL_TYPE_CONFUSION_OBJECT),
+            (ULONG)POOL_TAG
+        );
+	...
+        KernelTypeConfusionObject-&gt;ObjectID = UserTypeConfusionObject-&gt;ObjectID;
+        KernelTypeConfusionObject-&gt;ObjectType = UserTypeConfusionObject-&gt;ObjectType;
+	...
+        Status = TypeConfusionObjectInitializer(KernelTypeConfusionObject);
+	...
+NTSTATUS
+TypeConfusionIoctlHandler(
+    _In_ PIRP Irp,
+    _In_ PIO_STACK_LOCATION IrpSp
+)
+{
+    NTSTATUS Status = STATUS_UNSUCCESSFUL;
+    PUSER_TYPE_CONFUSION_OBJECT UserTypeConfusionObject = NULL;
+
+    UNREFERENCED_PARAMETER(Irp);
+    PAGED_CODE();
+
+    UserTypeConfusionObject = (PUSER_TYPE_CONFUSION_OBJECT)IrpSp-&gt;Parameters.DeviceIoControl.Type3InputBuffer;
+
+    if (UserTypeConfusionObject)
+    {
+        Status = TriggerTypeConfusion(UserTypeConfusionObject);
+    }
+
+    return Status;
+}</pre></code>
+		As we can see, the function TypeConfusionIoctlHandler, which is responsible for handling the IOCTL sent to it, calls TriggerTypeConfusion, which in turn calls TypeConfusionObjectInitializer and this is where the type confusion occurs, because KernelTypeConfusionObject is accessing
+		the Callback field, when instead it should treat it as an ObjectType field, just as the _USER_TYPE_CONFUSION_OBJECT does.
+		</p>
+
+		<h3>3.4 - Conclusion</h3>
+		This concludes the first part of the post. We understood how the driver works, interacted with it and identified the vulnerability. In part 2 we will learn how to develop the exploit and obtain a privileged shell. Thank you for reading.
+	</body>
+</html>
